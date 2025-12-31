@@ -1,18 +1,18 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './supabaseClient';
-import {
-  Plus,
-  Camera,
-  RefreshCw,
-  ChevronLeft,
-  CheckCircle2,
-  Circle,
-  Settings,
-  StickyNote,
-  X,
-  Edit2,
-  Briefcase,
-  ChevronDown,
+import { 
+  Plus, 
+  Camera, 
+  RefreshCw, 
+  ChevronLeft, 
+  CheckCircle2, 
+  Circle, 
+  Settings, 
+  StickyNote, 
+  X, 
+  Edit2, 
+  Briefcase, 
+  ChevronDown, 
   Trash2,
   Eye,
   EyeOff,
@@ -36,6 +36,9 @@ const App = () => {
   const [personModalType, setPersonModalType] = useState('creator'); // 'creator' | 'director'
   const [editingPerson, setEditingPerson] = useState(null);
   const [showPreShootTasks, setShowPreShootTasks] = useState(true);
+  const [nextShootCount, setNextShootCount] = useState('');
+  const [nextShootDate, setNextShootDate] = useState('');
+  const [nextShootSaveState, setNextShootSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved' | 'error'
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -103,9 +106,59 @@ const App = () => {
     }
   };
 
+  useEffect(() => {
+    // プロジェクト切り替え/データ再取得時に入力UIを同期（タスクではなく案件情報として保持）
+    setNextShootCount(currentProject?.next_shoot_count || '');
+    setNextShootDate(currentProject?.next_shoot_date || '');
+    setNextShootSaveState('idle');
+  }, [currentProject?.id, currentProject?.next_shoot_count, currentProject?.next_shoot_date]);
+
+  const persistNextShoot = async (fields) => {
+    if (!projectId) return;
+    setNextShootSaveState('saving');
+
+    // 楽観的更新（UI即反映）
+    setProjects(prev => prev.map(p => (p.id === projectId ? { ...p, ...fields } : p)));
+
+    const { error } = await supabase.from('projects').update(fields).eq('id', projectId);
+    if (!error) {
+      const { data: projectsData } = await supabase.from('projects').select('*');
+      setProjects(projectsData || []);
+      setNextShootSaveState('saved');
+      // すぐ消えるように
+      setTimeout(() => setNextShootSaveState('idle'), 1200);
+    } else {
+      setNextShootSaveState('error');
+      setAlertMessage('次回撮影情報の保存に失敗しました（projects側のカラムを確認してください）');
+    }
+  };
+
+  // 自動保存（入力後に少し待ってから保存）
+  useEffect(() => {
+    if (!projectId) return;
+    // currentProjectがまだ取れていない初期は走らせない
+    if (!currentProject) return;
+
+    const nextCount = nextShootCount || '';
+    const nextDate = nextShootDate || '';
+    const curCount = currentProject.next_shoot_count || '';
+    const curDate = currentProject.next_shoot_date || '';
+    if (nextCount === curCount && nextDate === curDate) return;
+
+    const t = setTimeout(() => {
+      persistNextShoot({
+        next_shoot_count: nextCount,
+        next_shoot_date: nextDate
+      });
+    }, 600);
+
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, nextShootCount, nextShootDate]);
+
   // メンバー削除
   const handleDeletePerson = async (id, name, type) => {
-    const assignedProjects = projects.filter(p =>
+    const assignedProjects = projects.filter(p => 
       type === 'creator' ? p.assigned_creator === name : p.director === name);
     if (assignedProjects.length > 0) {
       const projectNames = assignedProjects.map(p => p.client).join('、');
@@ -161,7 +214,7 @@ const App = () => {
   };
 
   // メンバー保存
-const savePerson = async (e) => {
+  const savePerson = async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
     const personData = {
@@ -202,8 +255,8 @@ const savePerson = async (e) => {
   // --- カスタムUIコンポーネント ---
   const CustomSelect = ({ value, onChange, options, className = "" }) => (
     <div className="relative w-full">
-      <select
-        value={value}
+      <select 
+        value={value} 
         onChange={onChange}
         className={`appearance-none w-full bg-white border-2 border-black px-2 py-1 text-[10px] font-black outline-none cursor-pointer hover:bg-slate-50 transition-colors pr-6 ${className}`}
       >
@@ -216,7 +269,7 @@ const savePerson = async (e) => {
   );
 
   // タスクテーブル
-  const TaskTable = ({ category, title, icon: Icon, colorClass, isFull = false }) => {
+  const TaskTable = ({ category, title, icon: Icon, colorClass, isFull = false, headerRight = null }) => {
     const filteredTasks = tasks.filter(t => t.project_id === projectId && t.category === category);
     const isSchedule = category === 'OP_EXEC';
     const [inputValue, setInputValue] = useState('');
@@ -235,6 +288,7 @@ const savePerson = async (e) => {
             <Icon size={18} />
             <span className="uppercase tracking-widest text-xs">{title}</span>
           </div>
+          {headerRight ? <div className="ml-3 flex items-center justify-end">{headerRight}</div> : null}
         </div>
         <table className="w-full text-left border-collapse">
           <thead>
@@ -251,7 +305,7 @@ const savePerson = async (e) => {
               <tr key={task.id} className="border-b-2 border-black group hover:bg-[#FFE900]/10 transition-colors">
                 <td className="p-2 text-center border-r-2 border-black font-black italic text-xs text-black">
                   {isSchedule ? (
-                    <input
+                    <input 
                       className="w-full bg-transparent text-center outline-none"
                       value={task.index_label}
                       onChange={e => updateTask(task.id, { index_label: e.target.value })}
@@ -263,7 +317,7 @@ const savePerson = async (e) => {
                   )}
                 </td>
                 <td className="p-2 border-r-2 border-black text-black">
-                  <input
+                  <input 
                     className={`w-full bg-transparent outline-none font-bold text-xs ${task.status === 'DONE' ? 'line-through text-slate-300 font-normal' : ''}`}
                     value={task.title}
                     onChange={e => updateTask(task.id, { title: e.target.value })}
@@ -272,13 +326,13 @@ const savePerson = async (e) => {
                 </td>
                 <td className="p-1 border-r-2 border-black text-black text-center">
                   {isSchedule ? (
-                    <CustomSelect
+                    <CustomSelect 
                       value={task.status}
                       onChange={e => updateTask(task.id, { status: e.target.value })}
                       options={POST_STATUS_OPTIONS.map(opt => <option key={opt}>{opt}</option>)}
                     />
                   ) : (
-                    <button
+                    <button 
                       onClick={() => updateTask(task.id, { status: task.status === 'DONE' ? 'TODO' : 'DONE' })}
                       className={`w-full py-0.5 border-2 border-black text-[9px] font-black uppercase ${task.status === 'DONE' ? 'bg-[#004097] text-white' : 'bg-white text-black'}`}
                     >
@@ -287,8 +341,8 @@ const savePerson = async (e) => {
                   )}
                 </td>
                 <td className="p-1 text-black">
-                  <input
-                    type="date"
+                  <input 
+                    type="date" 
                     className="w-full bg-white border-2 border-black px-1 py-0.5 text-[9px] font-black outline-none"
                     value={task.due_date || ''}
                     onChange={e => updateTask(task.id, { due_date: e.target.value })}
@@ -308,7 +362,7 @@ const savePerson = async (e) => {
                 ) : <Plus size={14} className="mx-auto text-slate-400" />}
               </td>
               <td colSpan={4} className="p-0">
-                <input
+                <input 
                   className="w-full bg-transparent px-3 py-2 text-xs font-bold outline-none placeholder:italic text-black"
                   placeholder={isSchedule ? "新しい動画タイトルを追加してEnter..." : "新しい項目を追加してEnter..."}
                   value={inputValue}
@@ -480,17 +534,25 @@ const savePerson = async (e) => {
                 if (creatorProjects.length === 0) return null;
                 return (
                   <div key={creator.id}>
-                    <div className="flex items-baseline gap-3 mb-3 border-b-4 border-black pb-1 uppercase font-black text-slate-400">
-                      <h3 className="text-xs italic">{creator.name} 担当</h3>
+                    <div className="flex items-center justify-between mb-3 border-b-4 border-black pb-2">
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 bg-black border-2 border-black shadow-[2px_2px_0px_#000]" />
+                        <h3 className="text-base md:text-lg font-black uppercase tracking-widest italic text-black">
+                          {creator.name}
+                        </h3>
+                        <span className="ml-1 px-2 py-0.5 border-2 border-black bg-white text-[10px] md:text-xs font-black uppercase tracking-widest text-black shadow-[2px_2px_0px_#000]">
+                          {creatorProjects.length}件
+                        </span>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-10 gap-2 text-black">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 text-black">
                       {creatorProjects.map(project => (
-                        <div
-                          key={project.id}
+                        <div 
+                          key={project.id} 
                           onClick={() => navigate(`/project/${project.id}`)}
-                          className="bg-white border-4 border-black p-3 group cursor-pointer hover:bg-[#FFE900] transition-all relative min-h-[70px] flex items-center justify-center text-center shadow-[4px_4px_0px_rgba(0,0,0,0.05)] hover:shadow-none"
+                          className="bg-white border-4 border-black p-3 group cursor-pointer hover:bg-[#FFE900] transition-all relative flex items-center justify-center text-center shadow-[4px_4px_0px_rgba(0,0,0,0.05)] hover:shadow-none"
                         >
-                          <h4 className="text-[10px] font-black uppercase italic truncate text-black">{project.client}</h4>
+                          <h4 className="text-xs md:text-sm font-black uppercase italic text-black line-clamp-2 leading-snug text-center">{project.client}</h4>
                         </div>
                       ))}
                     </div>
@@ -504,24 +566,24 @@ const savePerson = async (e) => {
         <Route path="/project/:id" element={
           currentProject ? (
             <div className="animate-in slide-in-from-bottom-4 duration-500 text-black max-w-full mx-auto p-4 lg:p-6 pb-24">
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-4 text-black">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-4 text-black">
                   <button onClick={() => navigate('/dashboard')} className="p-1.5 border-4 border-black hover:bg-black hover:text-white transition-all text-black"><ChevronLeft size={18} /></button>
-                  <h2 className="text-3xl lg:text-4xl font-black uppercase italic tracking-tighter text-black">{currentProject.client}</h2>
-                  <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">基本情報を更新</button>
-                </div>
-                <button
-                  onClick={() => setShowPreShootTasks(!showPreShootTasks)}
-                  className={`flex items-center gap-2 px-4 py-2 border-4 border-black font-black text-[10px] uppercase tracking-widest transition-all ${showPreShootTasks ? 'bg-white hover:bg-slate-50' : 'bg-black text-white'}`}
-                >
-                  {showPreShootTasks ? <EyeOff size={14} /> : <Eye size={14} />}
-                  {showPreShootTasks ? '初回タスクを隠す' : '初回タスクを表示'}
-                </button>
+                <h2 className="text-3xl lg:text-4xl font-black uppercase italic tracking-tighter text-black">{currentProject.client}</h2>
+                <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">基本情報を更新</button>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6 items-stretch font-black text-black">
-                <div className="bg-white border-4 border-black p-4 relative shadow-sm text-black">
+              <button 
+                onClick={() => setShowPreShootTasks(!showPreShootTasks)}
+                className={`flex items-center gap-2 px-4 py-2 border-4 border-black font-black text-[10px] uppercase tracking-widest transition-all ${showPreShootTasks ? 'bg-white hover:bg-slate-50' : 'bg-black text-white'}`}
+              >
+                {showPreShootTasks ? <EyeOff size={14} /> : <Eye size={14} />}
+                {showPreShootTasks ? '初回タスクを隠す' : '初回タスクを表示'}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6 items-stretch font-black text-black">
+              <div className="bg-white border-4 border-black p-4 relative shadow-sm text-black">
                   <h3 className="text-sm md:text-base font-black uppercase tracking-widest italic text-black mb-4 border-b-2 border-black pb-1">案件情報</h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-4 text-black font-black uppercase text-center">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-4 text-black font-black uppercase text-center">
                     <div className="col-span-1">
                       <p className="text-[10px] md:text-xs text-slate-500 italic mb-1 uppercase tracking-widest">Director</p>
                       <p className="text-sm md:text-base truncate">{currentProject.director}</p>
@@ -543,31 +605,71 @@ const savePerson = async (e) => {
                       <p className="text-sm md:text-base font-mono">{currentProject.expiry_month || '-'}</p>
                     </div>
                   </div>
-                </div>
-                <div className="bg-white border-4 border-black relative flex flex-col text-black shadow-sm font-black">
-                  <div className="px-3 py-1.5 border-b-2 border-black flex items-center justify-between bg-slate-50 font-black">
-                    <h3 className="text-[10px] font-black uppercase tracking-widest flex items-center gap-2 text-slate-500 italic font-bold text-black font-black"><StickyNote size={14} /> 共有メモ・注意事項</h3>
-                  </div>
-                  <textarea
-                    value={currentProject.memo}
-                    onChange={(e) => setProjects(projects.map(p => p.id === projectId ? { ...p, memo: e.target.value } : p))}
-                    placeholder="注意事項を入力..."
-                    className="flex-1 w-full p-3 text-[11px] font-black leading-relaxed outline-none min-h-[80px] resize-none focus:bg-[#FFE900]/5 text-black border-none"
-                  />
-                </div>
               </div>
-              <div className="space-y-4 text-black">
-                {showPreShootTasks && (
-                  <div className="animate-in slide-in-from-top-4 duration-300">
-                    <TaskTable category="PRE_SHOOT" title="初回撮影までのタスク" icon={Camera} colorClass="bg-[#FFE900]" isFull={true} />
-                  </div>
-                )}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <TaskTable category="OP_EXEC" title="編集投稿スケジュール" icon={RefreshCw} colorClass="bg-[#EC6C00] text-white" />
-                  <TaskTable category="OP_PREP" title="次回撮影の準備" icon={Settings} colorClass="bg-[#004097] text-white" />
+              <div className="bg-white border-4 border-black relative flex flex-col text-black shadow-sm font-black">
+                <div className="px-3 py-1.5 border-b-2 border-black flex items-center justify-between bg-slate-50 font-black">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest flex items-center gap-2 text-slate-500 italic font-bold text-black font-black"><StickyNote size={14} /> 共有メモ・注意事項</h3>
                 </div>
+                <textarea 
+                  value={currentProject.memo}
+                    onChange={(e) => setProjects(projects.map(p => p.id === projectId ? { ...p, memo: e.target.value } : p))}
+                  placeholder="注意事項を入力..."
+                  className="flex-1 w-full p-3 text-[11px] font-black leading-relaxed outline-none min-h-[80px] resize-none focus:bg-[#FFE900]/5 text-black border-none"
+                />
               </div>
             </div>
+
+            <div className="space-y-4 text-black">
+              {showPreShootTasks && (
+                <div className="animate-in slide-in-from-top-4 duration-300">
+                  <TaskTable category="PRE_SHOOT" title="初回撮影までのタスク" icon={Camera} colorClass="bg-[#FFE900]" isFull={true} />
+                </div>
+              )}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <TaskTable category="OP_EXEC" title="編集投稿スケジュール" icon={RefreshCw} colorClass="bg-[#EC6C00] text-white" />
+                  <TaskTable
+                    category="OP_PREP"
+                    title="次回撮影の準備"
+                    icon={Settings}
+                    colorClass="bg-[#004097] text-white"
+                    headerRight={(() => {
+                      const missing = !nextShootCount || !nextShootDate;
+                      return (
+                        <div className={`flex items-center gap-2 px-2 py-1 border-2 border-black ${missing ? 'bg-[#FFE900]' : 'bg-white'} text-black shadow-[2px_2px_0px_#000]`}>
+                          <div className="flex items-center gap-1">
+                            {missing ? <AlertTriangle size={14} /> : null}
+                            <span className="text-[9px] font-black uppercase tracking-widest whitespace-nowrap">
+                              次回撮影{missing ? ' 未設定' : ''}
+                            </span>
+                          </div>
+                          <input
+                            type="number"
+                            min="1"
+                            value={nextShootCount}
+                            onChange={(e) => setNextShootCount(e.target.value)}
+                            onBlur={() => persistNextShoot({ next_shoot_count: nextShootCount || '', next_shoot_date: nextShootDate || '' })}
+                            placeholder="回"
+                            className="w-14 bg-white border-2 border-black px-1 py-0.5 text-[10px] font-black outline-none text-black"
+                            title="第◯回"
+                          />
+                          <input
+                            type="date"
+                            value={nextShootDate}
+                            onChange={(e) => setNextShootDate(e.target.value)}
+                            onBlur={() => persistNextShoot({ next_shoot_count: nextShootCount || '', next_shoot_date: nextShootDate || '' })}
+                            className="w-[130px] bg-white border-2 border-black px-1 py-0.5 text-[10px] font-black outline-none text-black"
+                            title="撮影日"
+                          />
+                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-700 whitespace-nowrap">
+                            {nextShootSaveState === 'saving' ? '保存中' : nextShootSaveState === 'saved' ? '保存済' : nextShootSaveState === 'error' ? 'エラー' : ''}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  />
+            </div>
+          </div>
+        </div>
           ) : (
             <div className="p-12 text-center text-lg font-black">案件が見つかりません</div>
           )
