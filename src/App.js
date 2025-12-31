@@ -19,10 +19,19 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { Routes, Route, useNavigate, useParams, Link, useLocation } from 'react-router-dom';
+import AuthScreen from './AuthScreen';
 
 const POST_STATUS_OPTIONS = ["未編集", "編集中", "FIX", "投稿済み"];
 
 const App = () => {
+  // --- Auth / Role ---
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profile, setProfile] = useState(null); // { id, role, display_name, email }
+  const [profileError, setProfileError] = useState(null);
+  const [displayNameDraft, setDisplayNameDraft] = useState('');
+
   // アプリグローバルstate
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -48,6 +57,9 @@ const App = () => {
   const tabRefs = useRef({});
   const [navIndicator, setNavIndicator] = useState({ left: 0, width: 0, opacity: 0 });
 
+  const user = session?.user ?? null;
+  const isAdmin = profile?.role === 'admin';
+
   // ページ判定
   const isDashboard = location.pathname === '/dashboard';
   // extract :id from /project/:id
@@ -65,6 +77,75 @@ const App = () => {
       return () => clearTimeout(timer);
     }
   }, [alertMessage]);
+
+  // Auth session
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session ?? null);
+      setAuthLoading(false);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe?.();
+    };
+  }, []);
+
+  // Load profile (role)
+  useEffect(() => {
+    const load = async () => {
+      if (!user) {
+        setProfile(null);
+        setProfileError(null);
+        return;
+      }
+      setProfileLoading(true);
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, role, display_name, email')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      if (error) {
+        setProfile(null);
+        setProfileError(error.message || 'profiles取得に失敗しました');
+      } else {
+        setProfile(data || null);
+        setProfileError(null);
+        setDisplayNameDraft(data?.display_name || '');
+      }
+      setProfileLoading(false);
+    };
+    load();
+  }, [user?.id]);
+
+  const saveDisplayName = async () => {
+    if (!user) return;
+    const name = (displayNameDraft || '').trim();
+    if (!name) return;
+    const { error } = await supabase
+      .from('profiles')
+      .update({ display_name: name })
+      .eq('id', user.id);
+
+    if (!error) {
+      setProfile(prev => (prev ? { ...prev, display_name: name } : prev));
+      setAlertMessage('表示名を保存しました');
+    } else {
+      setAlertMessage('表示名の保存に失敗しました');
+    }
+  };
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setProfile(null);
+    navigate('/');
+  };
 
   // --- 操作ハンドラー ---
   const handleAddTask = async (category, title, indexLabel = '') => {
@@ -380,24 +461,42 @@ const App = () => {
   // --- データベースからのフェッチ（最初） ---
   useEffect(() => {
     const fetchAll = async () => {
+      if (!user) return;
       const [{ data: projectsData }, { data: tasksData }, { data: directorsData }, { data: creatorsData }] = await Promise.all([
         supabase.from('projects').select('*'),
         supabase.from('tasks').select('*'),
         supabase.from('directors').select('*'),
         supabase.from('creators').select('*')
       ]);
-      setProjects(projectsData || []);
+      // RLSが未設定でも「creatorは自分の案件だけ」を最低限クライアント側でも絞る
+      const role = profile?.role;
+      const displayName = profile?.display_name;
+      const filteredProjects =
+        role === 'creator' && displayName
+          ? (projectsData || []).filter(p => p.assigned_creator === displayName)
+          : (projectsData || []);
+
+      setProjects(filteredProjects);
       setTasks(tasksData || []);
       setDirectors(directorsData || []);
       setCreators(creatorsData || []);
     };
     fetchAll();
-  }, []);
+  }, [user?.id, profile?.role, profile?.display_name]);
 
   // ---------------- Render 部分 -----------------
   const DirectoryRoute = () => {
     const { type } = useParams();
     const normalizedType = type === 'creator' ? 'creator' : 'director';
+    if (!isAdmin) {
+      return (
+        <div className="max-w-full mx-auto p-6 text-black font-black">
+          <div className="border-4 border-black bg-white p-6 shadow-[8px_8px_0px_#000]">
+            権限がありません（管理者のみアクセス可能）
+          </div>
+        </div>
+      );
+    }
     return (
       <DirectoryView
         creators={creators}
@@ -451,6 +550,46 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNavKey]);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#FFE900] flex items-center justify-center p-6 text-black font-sans">
+        <div className="bg-white border-[6px] border-black p-10 shadow-[24px_24px_0px_rgba(0,0,0,1)] font-black">
+          読み込み中…
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen />;
+  }
+
+  // profilesテーブル未整備の場合、ここで止める（RLS前提のため）
+  if (profileError) {
+    return (
+      <div className="min-h-screen bg-[#FFE900] flex items-center justify-center p-6 text-black font-sans">
+        <div className="bg-white border-[6px] border-black p-10 max-w-2xl w-full shadow-[24px_24px_0px_rgba(0,0,0,1)]">
+          <h2 className="text-2xl font-black italic tracking-tighter mb-3">初期設定が必要です</h2>
+          <p className="text-[12px] font-black mb-4">
+            Supabase側に <code>profiles</code> テーブル（role管理）がまだ無い/権限で参照できないため、アプリを続行できません。
+          </p>
+          <div className="border-4 border-black p-4 text-[11px] font-black bg-slate-50">
+            <p className="mb-2">エラー:</p>
+            <p className="font-mono break-all">{profileError}</p>
+          </div>
+          <p className="text-[11px] font-black text-slate-600 mt-4">
+            こちらから渡すSQL（profiles作成 + RLS）をSupabaseのSQL Editorで実行してください。
+          </p>
+          <div className="mt-6 flex items-center justify-end">
+            <button onClick={signOut} className="bg-black text-white border-4 border-black px-4 py-2 text-[10px] font-black uppercase tracking-widest">
+              ログアウト
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       {/* エラー通知バー */}
@@ -481,27 +620,62 @@ const App = () => {
             >
               案件一覧
             </Link>
-            <Link
-              ref={(el) => { tabRefs.current.creator = el; }}
-              to="/directory/creator"
-              className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/creator' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
-            >
-              クリエイター
-            </Link>
-            <Link
-              ref={(el) => { tabRefs.current.director = el; }}
-              to="/directory/director"
-              className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/director' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
-            >
-              ディレクター
-            </Link>
+            {isAdmin && (
+              <>
+                <Link
+                  ref={(el) => { tabRefs.current.creator = el; }}
+                  to="/directory/creator"
+                  className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/creator' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
+                >
+                  クリエイター
+                </Link>
+                <Link
+                  ref={(el) => { tabRefs.current.director = el; }}
+                  to="/directory/director"
+                  className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/director' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
+                >
+                  ディレクター
+                </Link>
+              </>
+            )}
           </nav>
         </div>
         <div className="flex items-center gap-4 text-black">
-          <Link to="/" className="text-slate-400 hover:text-black transition-colors font-bold text-[10px] uppercase tracking-widest border-r-2 border-black pr-4 mr-2">ホーム</Link>
-          <p className="text-[11px] font-black uppercase tracking-tight">Givee メンバー</p>
+          <div className="hidden md:flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-slate-500 border-r-2 border-black pr-4 mr-2">
+            <span>{profile?.role || 'role: ?'}</span>
+            <span className="text-black">{profile?.display_name || user.email}</span>
+            {profileLoading ? <span className="text-slate-400">…</span> : null}
+          </div>
+          <button onClick={signOut} className="text-slate-400 hover:text-black transition-colors font-bold text-[10px] uppercase tracking-widest">
+            ログアウト
+          </button>
         </div>
       </header>
+
+      {/* creatorの権限制御に必要なので、表示名が未設定なら入力してもらう */}
+      {profile && !profile.display_name && (
+        <div className="border-b-4 border-black bg-white px-6 py-3">
+          <div className="max-w-full mx-auto flex flex-col md:flex-row md:items-center gap-3">
+            <p className="text-[11px] font-black text-slate-700">
+              権限制御のため、まず <span className="text-black">表示名（クリエイター名/ディレクター名）</span> を設定してください（案件のアサイン名と一致させます）。
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                value={displayNameDraft}
+                onChange={(e) => setDisplayNameDraft(e.target.value)}
+                placeholder="例: 田中 太郎"
+                className="px-3 py-2 border-4 border-black font-black text-[11px] outline-none w-56"
+              />
+              <button
+                onClick={saveDisplayName}
+                className="bg-black text-white border-4 border-black px-4 py-2 text-[10px] font-black uppercase tracking-widest hover:bg-[#004097] transition-colors"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <Routes>
         {/* HOME 画面 */}
         <Route path="/" element={
@@ -526,7 +700,13 @@ const App = () => {
                 <h2 className="text-3xl font-black uppercase italic tracking-tighter relative z-10 leading-none">運用案件ダッシュボード</h2>
                 <p className="text-[9px] font-black tracking-[0.3em] opacity-40 mt-2 uppercase text-black font-black uppercase">Active projects: {projects.length}</p>
               </div>
-              <button className="bg-black text-white px-6 py-2.5 font-black text-[10px] uppercase tracking-widest hover:translate-x-1 hover:-translate-y-1 transition-all shadow-[6px_6px_0px_#FFE900] border-4 border-black" onClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}>+ 新規案件登録</button>
+              {isAdmin ? (
+                <button className="bg-black text-white px-6 py-2.5 font-black text-[10px] uppercase tracking-widest hover:translate-x-1 hover:-translate-y-1 transition-all shadow-[6px_6px_0px_#FFE900] border-4 border-black" onClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}>
+                  + 新規案件登録
+                </button>
+              ) : (
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">閲覧のみ</div>
+              )}
             </div>
             <div className="space-y-12 text-black">
               {[...creators, { id: 'none', name: '未定' }].map(creator => {
@@ -570,7 +750,11 @@ const App = () => {
               <div className="flex items-center gap-4 text-black">
                   <button onClick={() => navigate('/dashboard')} className="p-1.5 border-4 border-black hover:bg-black hover:text-white transition-all text-black"><ChevronLeft size={18} /></button>
                 <h2 className="text-3xl lg:text-4xl font-black uppercase italic tracking-tighter text-black">{currentProject.client}</h2>
-                <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">基本情報を更新</button>
+                  {isAdmin && (
+                    <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">
+                      基本情報を更新
+                    </button>
+                  )}
               </div>
               <button 
                 onClick={() => setShowPreShootTasks(!showPreShootTasks)}
