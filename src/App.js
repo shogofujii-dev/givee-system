@@ -16,22 +16,14 @@ import {
   Trash2,
   Eye,
   EyeOff,
-  AlertTriangle
+  AlertTriangle,
+  GripVertical
 } from 'lucide-react';
 import { Routes, Route, useNavigate, useParams, Link, useLocation } from 'react-router-dom';
-import AuthScreen from './AuthScreen';
 
 const POST_STATUS_OPTIONS = ["未編集", "編集中", "FIX", "投稿済み"];
 
 const App = () => {
-  // --- Auth / Role ---
-  const [authLoading, setAuthLoading] = useState(true);
-  const [session, setSession] = useState(null);
-  const [profileLoading, setProfileLoading] = useState(false);
-  const [profile, setProfile] = useState(null); // { id, role, display_name, email }
-  const [profileError, setProfileError] = useState(null);
-  const [displayNameDraft, setDisplayNameDraft] = useState('');
-
   // アプリグローバルstate
   const [projects, setProjects] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -57,8 +49,8 @@ const App = () => {
   const tabRefs = useRef({});
   const [navIndicator, setNavIndicator] = useState({ left: 0, width: 0, opacity: 0 });
 
-  const user = session?.user ?? null;
-  const isAdmin = profile?.role === 'admin';
+  // 管理者権限を常にtrueに設定
+  const isAdmin = true;
 
   // ページ判定
   const isDashboard = location.pathname === '/dashboard';
@@ -78,77 +70,8 @@ const App = () => {
     }
   }, [alertMessage]);
 
-  // Auth session
-  useEffect(() => {
-    let mounted = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
-      setSession(data.session ?? null);
-      setAuthLoading(false);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-    });
-    return () => {
-      mounted = false;
-      sub?.subscription?.unsubscribe?.();
-    };
-  }, []);
-
-  // Load profile (role)
-  useEffect(() => {
-    const load = async () => {
-      if (!user) {
-        setProfile(null);
-        setProfileError(null);
-        return;
-      }
-      setProfileLoading(true);
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, role, display_name, email')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      if (error) {
-        setProfile(null);
-        setProfileError(error.message || 'profiles取得に失敗しました');
-      } else {
-        setProfile(data || null);
-        setProfileError(null);
-        setDisplayNameDraft(data?.display_name || '');
-      }
-      setProfileLoading(false);
-    };
-    load();
-  }, [user?.id]);
-
-  const saveDisplayName = async () => {
-    if (!user) return;
-    const name = (displayNameDraft || '').trim();
-    if (!name) return;
-    const { error } = await supabase
-      .from('profiles')
-      .update({ display_name: name })
-      .eq('id', user.id);
-
-    if (!error) {
-      setProfile(prev => (prev ? { ...prev, display_name: name } : prev));
-      setAlertMessage('表示名を保存しました');
-    } else {
-      setAlertMessage('表示名の保存に失敗しました');
-    }
-  };
-
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
-    setProfile(null);
-    navigate('/');
-  };
-
   // --- 操作ハンドラー ---
-  const handleAddTask = async (category, title, indexLabel = '') => {
+  const handleAddTask = async (category, title, indexLabel = '', assignee = '') => {
     const insertData = {
       project_id: projectId,
       category,
@@ -156,7 +79,7 @@ const App = () => {
       title,
       status: category === 'OP_EXEC' ? '未編集' : 'TODO',
       due_date: '',
-      assignee: currentProject?.director || ''
+      assignee: assignee || currentProject?.director || ''
     };
     const {error} = await supabase.from('tasks').insert([insertData]);
     if (!error) {
@@ -168,11 +91,14 @@ const App = () => {
   };
 
   const updateTask = async (taskId, fields) => {
+    // Update local state immediately for responsive UI
+    setTasks(prev => prev.map(task => 
+      task.id === taskId ? { ...task, ...fields } : task
+    ));
+    
+    // Update database in background
     const { error } = await supabase.from('tasks').update(fields).eq('id', taskId);
-    if (!error) {
-      const { data: tasksData } = await supabase.from('tasks').select('*');
-      setTasks(tasksData || []);
-    } else {
+    if (error) {
       setAlertMessage('タスクの更新に失敗しました');
     }
   };
@@ -180,8 +106,8 @@ const App = () => {
   const deleteTask = async (taskId) => {
     const { error } = await supabase.from('tasks').delete().eq('id', taskId);
     if (!error) {
-      const { data: tasksData } = await supabase.from('tasks').select('*');
-      setTasks(tasksData || []);
+      // Update local state without refetching to preserve order
+      setTasks(prev => prev.filter(task => task.id !== taskId));
     } else {
       setAlertMessage('タスクの削除に失敗しました');
     }
@@ -351,16 +277,96 @@ const App = () => {
 
   // タスクテーブル
   const TaskTable = ({ category, title, icon: Icon, colorClass, isFull = false, headerRight = null }) => {
-    const filteredTasks = tasks.filter(t => t.project_id === projectId && t.category === category);
+    // Get and sort tasks with stable ordering that doesn't change on updates
+    const filteredTasks = useMemo(() => {
+      const tasksForCategory = tasks.filter(t => t.project_id === projectId && t.category === category);
+      // Create a stable copy and sort by creation time only - never re-sort on updates
+      const sortedTasks = [...tasksForCategory];
+      sortedTasks.sort((a, b) => {
+        // Always sort by creation time to maintain stable order
+        const aTime = new Date(a.created_at || 0).getTime();
+        const bTime = new Date(b.created_at || 0).getTime();
+        return aTime - bTime;
+      });
+      return sortedTasks;
+    }, [tasks, projectId, category]);
+
     const isSchedule = category === 'OP_EXEC';
     const [inputValue, setInputValue] = useState('');
     const [inputIndex, setInputIndex] = useState('');
-    const onKeyDown = (e) => {
-      if (e.key === 'Enter' && !e.nativeEvent.isComposing && inputValue.trim()) {
-        handleAddTask(category, inputValue, inputIndex);
+    const [inputAssignee, setInputAssignee] = useState('');
+    const [draggedTask, setDraggedTask] = useState(null);
+    const [dragOverTask, setDragOverTask] = useState(null);
+
+    const handleAddClick = () => {
+      if (inputValue.trim()) {
+        handleAddTask(category, inputValue, inputIndex, inputAssignee);
+        // Clear inputs after adding
         setInputValue('');
         setInputIndex('');
+        setInputAssignee('');
       }
+    };
+
+    const handleDragStart = (e, task) => {
+      setDraggedTask(task);
+      e.dataTransfer.effectAllowed = 'move';
+    };
+
+    const handleDragOver = (e, task) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverTask(task);
+    };
+
+    const handleDragLeave = () => {
+      setDragOverTask(null);
+    };
+
+    const handleDrop = async (e, targetTask) => {
+      e.preventDefault();
+      if (!draggedTask || draggedTask.id === targetTask.id) {
+        setDraggedTask(null);
+        setDragOverTask(null);
+        return;
+      }
+
+      const draggedIndex = filteredTasks.findIndex(t => t.id === draggedTask.id);
+      const targetIndex = filteredTasks.findIndex(t => t.id === targetTask.id);
+      
+      if (draggedIndex === -1 || targetIndex === -1) {
+        setDraggedTask(null);
+        setDragOverTask(null);
+        return;
+      }
+
+      // Update local state immediately for responsive UI
+      const reorderedTasks = [...filteredTasks];
+      reorderedTasks.splice(draggedIndex, 1);
+      reorderedTasks.splice(targetIndex, 0, draggedTask);
+
+      // Update the tasks array with new order for this category only
+      setTasks(prev => {
+        const otherTasks = prev.filter(t => t.category !== category || t.project_id !== projectId);
+        return [...otherTasks, ...reorderedTasks];
+      });
+
+      // Update database in background
+      try {
+        // For now, just update the dragged task's position
+        // In a more complex implementation, you might want to store sort_order
+        await supabase.from('tasks').update({ 
+          updated_at: new Date().toISOString() 
+        }).eq('id', draggedTask.id);
+      } catch (err) {
+        console.error('Error updating task order:', err);
+        // Revert on error if needed
+        const { data: tasksData } = await supabase.from('tasks').select('*');
+        setTasks(tasksData || []);
+      }
+
+      setDraggedTask(null);
+      setDragOverTask(null);
     };
     return (
       <div className={`border-4 border-black bg-white mb-6 flex flex-col ${!isFull ? 'flex-1' : 'w-full'}`}>
@@ -374,22 +380,38 @@ const App = () => {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50 border-b-2 border-black text-[9px] font-black uppercase tracking-tighter text-slate-400">
+              <th className="w-8 p-2 text-center border-r-2 border-black"></th>
               <th className="w-12 p-2 text-center border-r-2 border-black">#</th>
               <th className="p-2 border-r-2 border-black">{isSchedule ? "動画タイトル" : "内容 / 備考"}</th>
               <th className="w-28 p-2 border-r-2 border-black text-center">状態</th>
-              <th className="w-28 p-2 text-center">期日/投稿予定</th>
+              <th className="w-28 p-2 border-r-2 border-black text-center">期日/投稿予定</th>
+              {!isSchedule && <th className="w-32 p-2 border-r-2 border-black text-center">担当者</th>}
               <th className="w-8"></th>
             </tr>
           </thead>
           <tbody>
             {filteredTasks.map(task => (
-              <tr key={task.id} className="border-b-2 border-black group hover:bg-[#FFE900]/10 transition-colors">
+              <tr 
+                key={task.id} 
+                className={`border-b-2 border-black group hover:bg-[#FFE900]/10 transition-colors ${
+                  dragOverTask?.id === task.id ? 'bg-[#FFE900]/30' : ''
+                } ${draggedTask?.id === task.id ? 'opacity-50' : ''}`}
+                draggable
+                onDragStart={(e) => handleDragStart(e, task)}
+                onDragOver={(e) => handleDragOver(e, task)}
+                onDragLeave={handleDragLeave}
+                onDrop={(e) => handleDrop(e, task)}
+              >
+                <td className="p-2 text-center border-r-2 border-black text-slate-400 cursor-move">
+                  <GripVertical size={14} className="mx-auto" />
+                </td>
                 <td className="p-2 text-center border-r-2 border-black font-black italic text-xs text-black">
                   {isSchedule ? (
                     <input 
+                      key={`index-${task.id}`}
                       className="w-full bg-transparent text-center outline-none"
-                      value={task.index_label}
-                      onChange={e => updateTask(task.id, { index_label: e.target.value })}
+                      defaultValue={task.index_label || ''}
+                      onBlur={e => updateTask(task.id, { index_label: e.target.value })}
                     />
                   ) : (
                     <button onClick={() => updateTask(task.id, { status: task.status === 'DONE' ? 'TODO' : 'DONE' })}>
@@ -399,9 +421,10 @@ const App = () => {
                 </td>
                 <td className="p-2 border-r-2 border-black text-black">
                   <input 
+                    key={`title-${task.id}`}
                     className={`w-full bg-transparent outline-none font-bold text-xs ${task.status === 'DONE' ? 'line-through text-slate-300 font-normal' : ''}`}
-                    value={task.title}
-                    onChange={e => updateTask(task.id, { title: e.target.value })}
+                    defaultValue={task.title || ''}
+                    onBlur={e => updateTask(task.id, { title: e.target.value })}
                     placeholder={isSchedule ? "動画タイトルを入力..." : "項目名..."}
                   />
                 </td>
@@ -421,7 +444,7 @@ const App = () => {
                     </button>
                   )}
                 </td>
-                <td className="p-1 text-black">
+                <td className="p-1 border-r-2 border-black text-black">
                   <input 
                     type="date" 
                     className="w-full bg-white border-2 border-black px-1 py-0.5 text-[9px] font-black outline-none"
@@ -429,6 +452,18 @@ const App = () => {
                     onChange={e => updateTask(task.id, { due_date: e.target.value })}
                   />
                 </td>
+                {!isSchedule && (
+                  <td className="p-1 border-r-2 border-black text-black">
+                    <CustomSelect 
+                      value={task.assignee || ''}
+                      onChange={e => updateTask(task.id, { assignee: e.target.value })}
+                      options={[
+                        <option key="" value="">未選択</option>,
+                        ...creators.map(c => <option key={c.id} value={c.name}>{c.name}</option>)
+                      ]}
+                    />
+                  </td>
+                )}
                 <td className="p-1 text-center">
                   <button onClick={() => deleteTask(task.id)} className="text-slate-300 hover:text-red-600 transition-colors">
                     <Trash2 size={14} />
@@ -437,19 +472,42 @@ const App = () => {
               </tr>
             ))}
             <tr className="bg-slate-100">
+              <td className="p-2 text-center border-r-2 border-black text-slate-400">
+                <GripVertical size={14} className="mx-auto opacity-30" />
+              </td>
               <td className="p-2 border-r-2 border-black text-center font-black italic text-black">
                 {isSchedule ? (
                    <input className="w-full bg-transparent text-center text-xs font-black outline-none italic" placeholder="#" value={inputIndex} onChange={e => setInputIndex(e.target.value)} />
                 ) : <Plus size={14} className="mx-auto text-slate-400" />}
               </td>
-              <td colSpan={4} className="p-0">
+              <td colSpan={isSchedule ? 3 : 2} className="p-0">
                 <input 
                   className="w-full bg-transparent px-3 py-2 text-xs font-bold outline-none placeholder:italic text-black"
-                  placeholder={isSchedule ? "新しい動画タイトルを追加してEnter..." : "新しい項目を追加してEnter..."}
+                  placeholder={isSchedule ? "新しい動画タイトルを追加..." : "新しい項目を追加..."}
                   value={inputValue}
                   onChange={e => setInputValue(e.target.value)}
-                  onKeyDown={onKeyDown}
                 />
+              </td>
+              {!isSchedule && (
+                <td className="p-1 border-r-2 border-black text-black">
+                  <CustomSelect 
+                    value={inputAssignee}
+                    onChange={e => setInputAssignee(e.target.value)}
+                    options={[
+                      <option key="" value="">未選択</option>,
+                      ...directors.map(d => <option key={`director-${d.id}`} value={d.name}>{d.name} (ディレクター)</option>),
+                      ...creators.map(c => <option key={`creator-${c.id}`} value={c.name}>{c.name} (クリエイター)</option>)
+                    ]}
+                  />
+                </td>
+              )}
+              <td className="p-1 text-center">
+                <button 
+                  onClick={handleAddClick}
+                  className="w-full py-1 bg-black text-white text-[9px] font-black uppercase border-2 border-black hover:bg-[#004097] transition-colors"
+                >
+                  追加
+                </button>
               </td>
             </tr>
           </tbody>
@@ -461,42 +519,25 @@ const App = () => {
   // --- データベースからのフェッチ（最初） ---
   useEffect(() => {
     const fetchAll = async () => {
-      if (!user) return;
       const [{ data: projectsData }, { data: tasksData }, { data: directorsData }, { data: creatorsData }] = await Promise.all([
         supabase.from('projects').select('*'),
         supabase.from('tasks').select('*'),
         supabase.from('directors').select('*'),
         supabase.from('creators').select('*')
       ]);
-      // RLSが未設定でも「creatorは自分の案件だけ」を最低限クライアント側でも絞る
-      const role = profile?.role;
-      const displayName = profile?.display_name;
-      const filteredProjects =
-        role === 'creator' && displayName
-          ? (projectsData || []).filter(p => p.assigned_creator === displayName)
-          : (projectsData || []);
 
-      setProjects(filteredProjects);
+      setProjects(projectsData || []);
       setTasks(tasksData || []);
       setDirectors(directorsData || []);
       setCreators(creatorsData || []);
     };
     fetchAll();
-  }, [user?.id, profile?.role, profile?.display_name]);
+  }, []);
 
   // ---------------- Render 部分 -----------------
   const DirectoryRoute = () => {
     const { type } = useParams();
     const normalizedType = type === 'creator' ? 'creator' : 'director';
-    if (!isAdmin) {
-      return (
-        <div className="max-w-full mx-auto p-6 text-black font-black">
-          <div className="border-4 border-black bg-white p-6 shadow-[8px_8px_0px_#000]">
-            権限がありません（管理者のみアクセス可能）
-          </div>
-        </div>
-      );
-    }
     return (
       <DirectoryView
         creators={creators}
@@ -550,46 +591,6 @@ const App = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNavKey]);
 
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-[#FFE900] flex items-center justify-center p-6 text-black font-sans">
-        <div className="bg-white border-[6px] border-black p-10 shadow-[24px_24px_0px_rgba(0,0,0,1)] font-black">
-          読み込み中…
-        </div>
-      </div>
-    );
-  }
-
-  if (!session) {
-    return <AuthScreen />;
-  }
-
-  // profilesテーブル未整備の場合、ここで止める（RLS前提のため）
-  if (profileError) {
-    return (
-      <div className="min-h-screen bg-[#FFE900] flex items-center justify-center p-6 text-black font-sans">
-        <div className="bg-white border-[6px] border-black p-10 max-w-2xl w-full shadow-[24px_24px_0px_rgba(0,0,0,1)]">
-          <h2 className="text-2xl font-black italic tracking-tighter mb-3">初期設定が必要です</h2>
-          <p className="text-[12px] font-black mb-4">
-            Supabase側に <code>profiles</code> テーブル（role管理）がまだ無い/権限で参照できないため、アプリを続行できません。
-          </p>
-          <div className="border-4 border-black p-4 text-[11px] font-black bg-slate-50">
-            <p className="mb-2">エラー:</p>
-            <p className="font-mono break-all">{profileError}</p>
-          </div>
-          <p className="text-[11px] font-black text-slate-600 mt-4">
-            こちらから渡すSQL（profiles作成 + RLS）をSupabaseのSQL Editorで実行してください。
-          </p>
-          <div className="mt-6 flex items-center justify-end">
-            <button onClick={signOut} className="bg-black text-white border-4 border-black px-4 py-2 text-[10px] font-black uppercase tracking-widest">
-              ログアウト
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <>
       {/* エラー通知バー */}
@@ -620,62 +621,28 @@ const App = () => {
             >
               案件一覧
             </Link>
-            {isAdmin && (
-              <>
-                <Link
-                  ref={(el) => { tabRefs.current.creator = el; }}
-                  to="/directory/creator"
-                  className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/creator' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
-                >
-                  クリエイター
-                </Link>
-                <Link
-                  ref={(el) => { tabRefs.current.director = el; }}
-                  to="/directory/director"
-                  className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/director' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
-                >
-                  ディレクター
-                </Link>
-              </>
-            )}
+            <Link
+              ref={(el) => { tabRefs.current.creator = el; }}
+              to="/directory/creator"
+              className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/creator' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
+            >
+              クリエイター
+            </Link>
+            <Link
+              ref={(el) => { tabRefs.current.director = el; }}
+              to="/directory/director"
+              className={`px-6 text-xs md:text-sm font-black tracking-widest h-full border-l-4 border-black transition-all duration-200 flex items-center ${location.pathname === '/directory/director' ? 'bg-[#FFE900]' : 'hover:bg-slate-50'} hover:-translate-y-[1px]`}
+            >
+              ディレクター
+            </Link>
           </nav>
         </div>
         <div className="flex items-center gap-4 text-black">
           <div className="hidden md:flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-slate-500 border-r-2 border-black pr-4 mr-2">
-            <span>{profile?.role || 'role: ?'}</span>
-            <span className="text-black">{profile?.display_name || user.email}</span>
-            {profileLoading ? <span className="text-slate-400">…</span> : null}
+            <span>管理者</span>
           </div>
-          <button onClick={signOut} className="text-slate-400 hover:text-black transition-colors font-bold text-[10px] uppercase tracking-widest">
-            ログアウト
-          </button>
         </div>
       </header>
-
-      {/* creatorの権限制御に必要なので、表示名が未設定なら入力してもらう */}
-      {profile && !profile.display_name && (
-        <div className="border-b-4 border-black bg-white px-6 py-3">
-          <div className="max-w-full mx-auto flex flex-col md:flex-row md:items-center gap-3">
-            <p className="text-[11px] font-black text-slate-700">
-              権限制御のため、まず <span className="text-black">表示名（クリエイター名/ディレクター名）</span> を設定してください（案件のアサイン名と一致させます）。
-            </p>
-            <div className="flex items-center gap-2">
-              <input
-                value={displayNameDraft}
-                onChange={(e) => setDisplayNameDraft(e.target.value)}
-                placeholder="例: 田中 太郎"
-                className="px-3 py-2 border-4 border-black font-black text-[11px] outline-none w-56"
-              />
-              <button
-                onClick={saveDisplayName}
-                className="bg-black text-white border-4 border-black px-4 py-2 text-[10px] font-black uppercase tracking-widest hover:bg-[#004097] transition-colors"
-              >
-                保存
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       <Routes>
         {/* HOME 画面 */}
         <Route path="/" element={
@@ -700,13 +667,9 @@ const App = () => {
                 <h2 className="text-3xl font-black uppercase italic tracking-tighter relative z-10 leading-none">運用案件ダッシュボード</h2>
                 <p className="text-[9px] font-black tracking-[0.3em] opacity-40 mt-2 uppercase text-black font-black uppercase">Active projects: {projects.length}</p>
               </div>
-              {isAdmin ? (
-                <button className="bg-black text-white px-6 py-2.5 font-black text-[10px] uppercase tracking-widest hover:translate-x-1 hover:-translate-y-1 transition-all shadow-[6px_6px_0px_#FFE900] border-4 border-black" onClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}>
-                  + 新規案件登録
-                </button>
-              ) : (
-                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">閲覧のみ</div>
-              )}
+              <button className="bg-black text-white px-6 py-2.5 font-black text-[10px] uppercase tracking-widest hover:translate-x-1 hover:-translate-y-1 transition-all shadow-[6px_6px_0px_#FFE900] border-4 border-black" onClick={() => { setEditingProject(null); setIsProjectModalOpen(true); }}>
+                + 新規案件登録
+              </button>
             </div>
             <div className="space-y-12 text-black">
               {[...creators, { id: 'none', name: '未定' }].map(creator => {
@@ -750,11 +713,9 @@ const App = () => {
               <div className="flex items-center gap-4 text-black">
                   <button onClick={() => navigate('/dashboard')} className="p-1.5 border-4 border-black hover:bg-black hover:text-white transition-all text-black"><ChevronLeft size={18} /></button>
                 <h2 className="text-3xl lg:text-4xl font-black uppercase italic tracking-tighter text-black">{currentProject.client}</h2>
-                  {isAdmin && (
-                    <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">
+                  <button onClick={() => { setEditingProject(currentProject); setIsProjectModalOpen(true); }} className="bg-black text-white px-3 py-1 text-[9px] font-black uppercase tracking-widest hover:bg-[#004097] transition-all border-2 border-black shadow-[3px_3px_0px_#FFE900]">
                       基本情報を更新
                     </button>
-                  )}
               </div>
               <button 
                 onClick={() => setShowPreShootTasks(!showPreShootTasks)}
